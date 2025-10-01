@@ -290,129 +290,141 @@ class DeltaUtilities:
             logger.warning(f"Unrecognized path scheme for: {path}")
 
 
-def compact_delta_table(
-    table_path: str,
-    storage_options: Optional[Dict[str, str]] = None,
+def optimize_delta_table(
+    path: str,
+    *,
+    mode: str = "compact",
+    z_order_columns: Optional[List[str]] = None,
     partition_filters: Optional[List[tuple]] = None,
     target_size: Optional[int] = None,
     max_concurrent_tasks: Optional[int] = None,
-) -> Dict[str, Any]:
-    """
-    Compact a Delta table by merging small files.
-
-    Args:
-        table_path: Path to the Delta table
-        storage_options: Storage options for the filesystem
-        partition_filters: Optional partition filters
-        target_size: Target file size in bytes
-        max_concurrent_tasks: Maximum concurrent tasks
-
-    Returns:
-        Dict with compaction metrics
-    """
-    try:
-        dt = DeltaTable(table_path, storage_options=storage_options)
-
-        # Perform compaction
-        metrics = dt.optimize.compact(
-            partition_filters=partition_filters,
-            target_size=target_size,
-            max_concurrent_tasks=max_concurrent_tasks,
-        )
-
-        return {
-            "files_added": metrics.get("files_added", 0),
-            "files_removed": metrics.get("files_removed", 0),
-            "partitions_optimized": metrics.get("partitions_optimized", 0),
-            "num_batches": metrics.get("num_batches", 0),
-            "total_considered_files": metrics.get("total_considered_files", 0),
-            "total_files_skipped": metrics.get("total_files_skipped", 0),
-        }
-    except Exception as e:
-        logger.error(f"Compaction failed: {e}")
-        raise
-
-
-def z_order_delta_table(
-    table_path: str,
-    columns: List[str],
     storage_options: Optional[Dict[str, str]] = None,
-    partition_filters: Optional[List[tuple]] = None,
-    target_size: Optional[int] = None,
-    max_concurrent_tasks: Optional[int] = None,
-    max_spill_size: int = 20 * 1024 * 1024 * 1024,  # 20GB
 ) -> Dict[str, Any]:
     """
-    Optimize a Delta table using Z-order clustering.
-
+    Optimize a Delta Lake table using compact or z-order.
+    
     Args:
-        table_path: Path to the Delta table
-        columns: Columns to Z-order by
-        storage_options: Storage options for the filesystem
-        partition_filters: Optional partition filters
+        path: Path to the Delta table
+        mode: Optimization mode - "compact" or "z_order"
+        z_order_columns: Columns for z-order optimization (required if mode="z_order")
+        partition_filters: Optional partition filters to limit optimization scope
         target_size: Target file size in bytes
-        max_concurrent_tasks: Maximum concurrent tasks
-        max_spill_size: Maximum spill size in bytes
-
+        max_concurrent_tasks: Maximum concurrent optimization tasks
+        storage_options: Cloud storage authentication options
+        
     Returns:
-        Dict with Z-order metrics
+        Dict with optimization metrics including files_added, files_removed,
+        partitions_optimized, etc.
+        
+    Raises:
+        ValueError: If mode is invalid or z_order_columns missing for z_order mode
+        ImportError: If deltalake package is not installed
+        
+    Examples:
+        Compact small files:
+        
+        >>> import ray
+        >>> metrics = ray.data.optimize_delta_table("s3://bucket/table") # doctest: +SKIP
+        
+        Z-order by columns:
+        
+        >>> metrics = ray.data.optimize_delta_table( # doctest: +SKIP
+        ...     "s3://bucket/table",
+        ...     mode="z_order",
+        ...     z_order_columns=["customer_id", "date"]
+        ... )
     """
     try:
-        dt = DeltaTable(table_path, storage_options=storage_options)
-
-        # Perform Z-order optimization
-        metrics = dt.optimize.z_order(
-            columns=columns,
-            partition_filters=partition_filters,
-            target_size=target_size,
-            max_concurrent_tasks=max_concurrent_tasks,
-            max_spill_size=max_spill_size,
-        )
-
-        return {
-            "files_added": metrics.get("files_added", 0),
-            "files_removed": metrics.get("files_removed", 0),
-            "partitions_optimized": metrics.get("partitions_optimized", 0),
-            "num_batches": metrics.get("num_batches", 0),
-            "total_considered_files": metrics.get("total_considered_files", 0),
-            "total_files_skipped": metrics.get("total_files_skipped", 0),
-        }
+        dt_kwargs = {}
+        if storage_options:
+            dt_kwargs["storage_options"] = storage_options
+        
+        dt = DeltaTable(path, **dt_kwargs)
+        
+        opt_kwargs = {}
+        if partition_filters:
+            opt_kwargs["partition_filters"] = partition_filters
+        if target_size:
+            opt_kwargs["target_size"] = target_size
+        if max_concurrent_tasks:
+            opt_kwargs["max_concurrent_tasks"] = max_concurrent_tasks
+        
+        if mode == "compact":
+            metrics = dt.optimize.compact(**opt_kwargs)
+        elif mode == "z_order":
+            if not z_order_columns:
+                raise ValueError("z_order_columns required for z_order mode")
+            metrics = dt.optimize.z_order(columns=z_order_columns, **opt_kwargs)
+        else:
+            raise ValueError(f"Invalid mode: {mode}. Use 'compact' or 'z_order'")
+        
+        return dict(metrics)
     except Exception as e:
-        logger.error(f"Z-order optimization failed: {e}")
+        logger.error(f"Optimize failed for {path}: {e}")
         raise
 
 
 def vacuum_delta_table(
-    table_path: str,
+    path: str,
+    *,
     retention_hours: Optional[int] = None,
-    storage_options: Optional[Dict[str, str]] = None,
+    dry_run: bool = True,
     enforce_retention_duration: bool = True,
-    dry_run: bool = False,
+    storage_options: Optional[Dict[str, str]] = None,
 ) -> List[str]:
     """
-    Vacuum a Delta table to remove old files.
-
+    Vacuum a Delta Lake table to remove old files.
+    
+    Removes files that are no longer referenced by the Delta table and are older
+    than the retention threshold. Use with caution as this permanently deletes files.
+    
     Args:
-        table_path: Path to the Delta table
-        retention_hours: Retention period in hours
-        storage_options: Storage options for the filesystem
-        enforce_retention_duration: Whether to enforce retention duration
-        dry_run: Whether to perform a dry run
-
+        path: Path to the Delta table
+        retention_hours: Retention period in hours (default: 168 hours = 7 days)
+        dry_run: If True, only list files without deleting them. Defaults to True
+            for safety.
+        enforce_retention_duration: Whether to enforce minimum retention period
+        storage_options: Cloud storage authentication options
+        
     Returns:
-        List of files that were or would be deleted
+        List of file paths that were deleted (or would be deleted if dry_run=True)
+        
+    Raises:
+        ImportError: If deltalake package is not installed
+        
+    Examples:
+        Preview files to delete (dry run):
+        
+        >>> import ray
+        >>> files = ray.data.vacuum_delta_table("s3://bucket/table", dry_run=True) # doctest: +SKIP
+        
+        Actually delete old files:
+        
+        >>> files = ray.data.vacuum_delta_table( # doctest: +SKIP
+        ...     "s3://bucket/table",
+        ...     retention_hours=168,
+        ...     dry_run=False
+        ... )
+        
+    .. warning::
+        This operation permanently deletes files. Ensure you have proper backups
+        and understand the retention implications before running with dry_run=False.
     """
     try:
-        dt = DeltaTable(table_path, storage_options=storage_options)
-
-        # Perform vacuum operation
+        dt_kwargs = {}
+        if storage_options:
+            dt_kwargs["storage_options"] = storage_options
+        
+        dt = DeltaTable(path, **dt_kwargs)
+        
         files = dt.vacuum(
             retention_hours=retention_hours,
-            enforce_retention_duration=enforce_retention_duration,
             dry_run=dry_run,
+            enforce_retention_duration=enforce_retention_duration,
         )
-
-        return files
+        
+        return list(files)
     except Exception as e:
-        logger.error(f"Vacuum failed: {e}")
+        logger.error(f"Vacuum failed for {path}: {e}")
         raise
+

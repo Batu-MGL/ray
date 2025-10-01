@@ -3795,6 +3795,12 @@ def read_unity_catalog(
 def read_delta(
     path: Union[str, List[str]],
     *,
+    version: Optional[Union[int, str]] = None,
+    storage_options: Optional[Dict[str, str]] = None,
+    partition_filters: Optional[List[tuple]] = None,
+    cdf: bool = False,
+    starting_version: int = 0,
+    ending_version: Optional[int] = None,
     filesystem: Optional["pyarrow.fs.FileSystem"] = None,
     columns: Optional[List[str]] = None,
     parallelism: int = -1,
@@ -3810,14 +3816,69 @@ def read_delta(
 ):
     """Creates a :class:`~ray.data.Dataset` from Delta Lake files.
 
+    Supports reading from Unity Catalog tables by directly accessing the underlying
+    S3/cloud storage paths. Provides time travel, partition filtering, Change Data
+    Feed (CDF), and other Delta Lake features.
+
     Examples:
+        Read latest version of Delta table:
 
         >>> import ray
-        >>> ds = ray.data.read_delta("s3://bucket@path/to/delta-table/") # doctest: +SKIP
+        >>> ds = ray.data.read_delta("s3://bucket/path/to/delta-table/") # doctest: +SKIP
+
+        Read specific version (time travel):
+
+        >>> ds = ray.data.read_delta( # doctest: +SKIP
+        ...     "s3://bucket/path/to/delta-table/",
+        ...     version=5
+        ... )
+
+        Read Change Data Feed (CDF) for incremental ETL:
+
+        >>> ds = ray.data.read_delta( # doctest: +SKIP
+        ...     "s3://bucket/table",
+        ...     cdf=True,
+        ...     starting_version=10,
+        ...     ending_version=20
+        ... )
+
+        Read from Unity Catalog managed table (direct S3 path):
+
+        >>> ds = ray.data.read_delta( # doctest: +SKIP
+        ...     "s3://bucket/catalog/schema/table/",
+        ...     storage_options={"AWS_REGION": "us-west-2"}
+        ... )
+
+        Read with partition filtering:
+
+        >>> ds = ray.data.read_delta( # doctest: +SKIP
+        ...     "s3://bucket/path/to/delta-table/",
+        ...     partition_filters=[("year", "=", "2024"), ("month", "=", "01")]
+        ... )
 
     Args:
-        path: A single file path for a Delta Lake table. Multiple tables are not yet
-            supported.
+        path: Path to a Delta Lake table. Supports local paths, S3, GCS, Azure, and
+            Unity Catalog managed table paths. Multiple tables are not yet supported.
+        version: Version of the Delta table to read. Can be:
+            
+            * Integer version number (e.g., ``5`` for version 5)
+            * ISO 8601 timestamp string (e.g., ``"2024-01-01T00:00:00Z"``)
+            * If None, reads the latest version
+            
+        storage_options: Storage options for cloud authentication. Examples:
+        
+            * AWS S3: ``{"AWS_REGION": "us-west-2", "AWS_ACCESS_KEY_ID": "...", "AWS_SECRET_ACCESS_KEY": "..."}``
+            * Google Cloud: ``{"GOOGLE_SERVICE_ACCOUNT": "path/to/service-account.json"}``
+            * Azure: ``{"AZURE_STORAGE_ACCOUNT_KEY": "..."}``
+            
+        partition_filters: Delta Lake partition filters in DNF (Disjunctive Normal Form).
+            Each tuple is ``(column, operator, value)`` where operator can be
+            ``=``, ``!=``, ``in``, or ``not in``. Examples:
+            
+            * ``[("year", "=", "2024")]``
+            * ``[("year", "=", "2024"), ("month", "in", ["01", "02"])]``
+            
+        filesystem: The PyArrow filesystem
         filesystem: The PyArrow filesystem
             implementation to read from. These filesystems are specified in the
             `pyarrow docs <https://arrow.apache.org/docs/python/api/\
@@ -3875,14 +3936,53 @@ def read_delta(
         )
 
     from deltalake import DeltaTable
+    import pyarrow as pa
 
     # This seems reasonable to keep it at one table, even Spark doesn't really support
     # multi-table reads, it's usually up to the developer to keep it in one table.
     if not isinstance(path, str):
         raise ValueError("Only a single Delta Lake table path is supported.")
 
+    # Build DeltaTable constructor arguments
+    delta_table_kwargs = {}
+    if storage_options is not None:
+        delta_table_kwargs["storage_options"] = storage_options
+    if version is not None and not cdf:
+        # Version parameter is for snapshot reads, not CDF
+        delta_table_kwargs["version"] = version
+    
+    # Handle deletion vectors (enabled by default for correctness)
+    # Set ignore_deletion_vectors=True in options to skip deletion vector handling
+    delta_table_kwargs["options"] = {"ignore_deletion_vectors": False}
+
+    # Load the Delta table (with optional version and storage options)
+    dt = DeltaTable(path, **delta_table_kwargs)
+
+    # Handle Change Data Feed (CDF) mode
+    if cdf:
+        # Delegate to distributed CDF reading implementation in delta_cdf module
+        from ray.data._internal.datasource.delta.delta_cdf import (
+            read_delta_cdf_distributed,
+        )
+        
+        return read_delta_cdf_distributed(
+            path=path,
+            starting_version=starting_version,
+            ending_version=ending_version,
+            columns=columns,
+            predicate=arrow_parquet_args.get("filters"),
+            storage_options=storage_options,
+            override_num_blocks=override_num_blocks,
+        )
+
+    # Regular snapshot read (not CDF)
     # Get the parquet file paths from the DeltaTable
-    paths = DeltaTable(path).file_uris()
+    # Apply partition filters at Delta level if specified
+    if partition_filters is not None:
+        paths = dt.file_uris(partition_filters=partition_filters)
+    else:
+        paths = dt.file_uris()
+    
     file_extensions = ["parquet"]
 
     return read_parquet(
@@ -3901,7 +4001,6 @@ def read_delta(
         override_num_blocks=override_num_blocks,
         **arrow_parquet_args,
     )
-
 
 def _get_datasource_or_legacy_reader(
     ds: Datasource,

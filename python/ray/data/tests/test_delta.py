@@ -23,11 +23,9 @@ except ImportError:
 
 import ray
 from ray.data._internal.datasource.delta import (
-    MergeConditions,
-    MergeConfig,
-    compact_delta_table,
-    vacuum_delta_table,
-    z_order_delta_table,
+    DeltaDatasink,
+    DeltaWriteConfig,
+    WriteMode,
 )
 from ray.data.datasource.path_util import _unwrap_protocol
 
@@ -415,6 +413,7 @@ def test_delta_write_partitioned(data_path, batch_size, write_mode):
 
 
 @pytest.mark.parametrize("scd_type", [1, 2, 3])
+@pytest.mark.skip(reason="Merge/SCD/optimization functionality not included in v1")
 def test_scd_convenience_parameters(tmp_path, scd_type):
     """Test SCD convenience parameters in write_delta function."""
     import pandas as pd
@@ -475,6 +474,7 @@ def test_scd_convenience_parameters(tmp_path, scd_type):
         assert len(result_rows) == 4  # Same count but with previous value columns
 
 
+@pytest.mark.skip(reason="Merge/SCD/optimization functionality not included in v1")
 def test_merge_conditions(tmp_path):
     """Test merge conditions."""
     import pandas as pd
@@ -538,6 +538,7 @@ def test_merge_conditions(tmp_path):
 
 
 @pytest.mark.parametrize("optimization_type", ["compact", "z_order", "vacuum"])
+@pytest.mark.skip(reason="Merge/SCD/optimization functionality not included in v1")
 def test_standalone_utility_functions(tmp_path, optimization_type):
     """Test standalone utility functions for Delta table optimization."""
     import pandas as pd
@@ -580,6 +581,7 @@ def test_standalone_utility_functions(tmp_path, optimization_type):
     assert ds.count() == 200
 
 
+@pytest.mark.skip(reason="Merge/SCD/optimization functionality not included in v1")
 def test_merge_config_comprehensive(tmp_path):
     """Test comprehensive MergeConfig functionality."""
     import pandas as pd
@@ -679,6 +681,7 @@ def test_microbatch_processing(tmp_path):
     assert all("id" in row for row in sample_rows)
 
 
+@pytest.mark.skip(reason="Merge/SCD/optimization functionality not included in v1")
 def test_advanced_merge_operations(tmp_path):
     """Test advanced merge scenarios with comprehensive validation."""
     with delta_test_context("advanced_merge", str(tmp_path)) as temp_dir:

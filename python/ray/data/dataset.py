@@ -3378,6 +3378,8 @@ class Dataset:
 
     @ConsumptionAPI
     @PublicAPI(api_group=IOC_API_GROUP)
+    @ConsumptionAPI
+    @PublicAPI(api_group=IOC_API_GROUP)
     def write_delta(
         self,
         path: str,
@@ -3389,50 +3391,36 @@ class Dataset:
         storage_options: Optional[Dict[str, str]] = None,
         ray_remote_args: Optional[Dict[str, Any]] = None,
         concurrency: Optional[int] = None,
-        # Delta-specific merge parameters
-        merge_predicate: Optional[str] = None,
-        scd_type: Optional[int] = None,
-        key_columns: Optional[List[str]] = None,
-        # Advanced configuration (kwargs)
         **delta_kwargs,
     ):
-        """Writes the :class:`~ray.data.Dataset` to a Delta Lake table.
-
-        The number of files is determined by the number of blocks in the dataset.
-        To control the number of number of blocks, call
-        :meth:`~ray.data.Dataset.repartition`.
+        """Write the dataset to a Delta Lake table.
 
         This method provides Delta Lake functionality including ACID transactions,
-        schema evolution, time travel, and merge operations with SCD support.
+        schema enforcement, and multi-cloud storage support via delta-rs.
+
+        The number of files is determined by the number of blocks in the dataset.
+        To control the number of blocks, call :meth:`~ray.data.Dataset.repartition`.
 
         Examples:
-            Write the dataset to a Delta table:
+            Write the dataset to a Delta table (append mode):
 
             >>> import ray
             >>> ds = ray.data.range(100)
-            >>> ds.write_delta("local:///tmp/data/")
+            >>> ds.write_delta("/tmp/my-delta-table")
 
-            Write with merge operation:
+            Write with overwrite mode and partitioning:
 
+            >>> ds = ray.data.range(1000).add_column("year", lambda x: 2024)
             >>> ds.write_delta(
             ...     "s3://my-bucket/table",
-            ...     mode="merge",
-            ...     merge_predicate="target.id = source.id"
-            ... )
-
-            Write with SCD Type 2:
-
-            >>> ds.write_delta(
-            ...     "path/to/table",
-            ...     mode="merge",
-            ...     scd_type=2,
-            ...     key_columns=["customer_id"]
+            ...     mode="overwrite",
+            ...     partition_cols=["year"]
             ... )
 
         Time complexity: O(dataset size / parallelism)
 
         Args:
-            path: The path to the destination Delta table. Supports:
+            path: Path to the destination Delta table. Supports:
 
                 * Local filesystem: ``/path/to/table`` or ``file:///path/to/table``
                 * AWS S3: ``s3://bucket/path`` or ``s3a://bucket/path``
@@ -3447,119 +3435,67 @@ class Dataset:
                 * ``"overwrite"``: Replace entire table with new data
                 * ``"error"``: Raise error if table already exists
                 * ``"ignore"``: Do nothing if table already exists
-                * ``"merge"``: Perform merge operation using merge_predicate
 
             partition_cols: Column names to partition the table by.
                 Files are written in Hive-style partitions (e.g., ``year=2023/month=01/``).
-                Improves query performance for filtered reads. Example: ``["year", "month", "day"]``
+                Improves query performance for filtered reads.
+                Example: ``["year", "month", "day"]``
 
             filesystem: PyArrow filesystem implementation.
-                If None, automatically detected from path scheme. Use for custom configurations
-                like credentials or connection parameters. Note that PyArrow filesystem is not picked
-                up by the deltalake library, so you need to pass associated credentials to the
-                storage_options parameter.
+                If None, automatically detected from path scheme. Use for custom
+                configurations like credentials or connection parameters. Note that
+                PyArrow filesystem is not picked up by the deltalake library, so you
+                need to pass associated credentials to the storage_options parameter.
 
             try_create_dir: Whether to create directories if they don't exist.
-                Defaults to True. Set to False if you want to ensure the directory structure
+                Defaults to True. Set to False to ensure the directory structure
                 already exists.
 
-            storage_options: Cloud storage authentication options.
-                Options are passed to the Delta Lake filesystem. Common options:
+            storage_options: Cloud storage authentication options passed to Delta Lake.
+                Common options:
 
                 * AWS S3: ``{"AWS_ACCESS_KEY_ID": "...", "AWS_SECRET_ACCESS_KEY": "..."}``
                 * Google Cloud: ``{"GOOGLE_SERVICE_ACCOUNT": "path/to/service-account.json"}``
                 * Azure: ``{"AZURE_STORAGE_ACCOUNT_NAME": "...", "AZURE_STORAGE_ACCOUNT_KEY": "..."}``
 
-            ray_remote_args: Arguments passed to ``ray.remote()``
-                for write tasks. Example: ``{"num_cpus": 2, "memory": "2GB"}``
+            ray_remote_args: Arguments passed to ``ray.remote()`` for write tasks.
+                Example: ``{"num_cpus": 2, "memory": "2GB"}``
 
             concurrency: Maximum number of Ray tasks to run concurrently.
-                If None, Ray automatically determines optimal concurrency based on cluster resources.
+                If None, Ray automatically determines optimal concurrency based on
+                cluster resources.
 
-            merge_predicate: SQL predicate for merge operations when ``mode="merge"``.
-                Defines how to match source and target records. Examples:
+            delta_kwargs: Additional Delta Lake write options passed to delta-rs.
+                Common options include ``schema_mode`` for schema evolution,
+                ``name`` and ``description`` for table metadata, ``configuration``
+                for Delta table properties, and ``engine`` for the Delta Lake engine.
 
-                * ``"target.id = source.id"``
-                * ``"target.customer_id = source.customer_id AND target.date = source.date"``
-                * ``"target.email = source.email"``
-
-            scd_type: Slowly Changing Dimension type (1, 2, or 3).
-                Automatically configures merge behavior for common SCD patterns:
-
-                * **Type 1**: Overwrite existing records (no history preservation)
-                * **Type 2**: Insert new records with versioning (preserves full history)
-                * **Type 3**: Update specific columns while preserving others
-
-                Requires ``key_columns`` parameter.
-
-            key_columns: Key columns for SCD operations.
-                Used to identify records for SCD merge operations.
-                Example: ``["customer_id"]`` or ``["customer_id", "product_id"]``
-
-                        delta_kwargs: Advanced Delta Lake options. These arguments are passed to the underlying
-                Delta Lake writer. Common options include ``compression`` for Parquet compression,
-                ``writer_properties`` for advanced Parquet settings, ``schema`` for schema enforcement,
-                ``name`` and ``description`` for table metadata, ``merge_config`` for advanced
-                merge operations, and ``optimization_config`` for post-write optimization.
-
-                Raises:
-            ValueError: If required merge parameters are missing or invalid.
+        Raises:
+            ValueError: If the mode is invalid or path is malformed.
+            ImportError: If deltalake package is not installed.
 
         Note:
-            This operation will trigger execution of the lazy transformations
-            performed on this dataset. For merge operations, either ``merge_predicate``
-            or ``scd_type`` is required.
+            This operation triggers execution of lazy transformations performed on
+            this dataset. Merge operations are not supported in v1 - use append or
+            overwrite modes.
         """
-        # Build merge configuration from simplified parameters
-        merge_config = None
-        if mode == "merge":
-            if scd_type is not None:
-                if not key_columns:
-                    raise ValueError("key_columns required when using scd_type")
-                scd_config = SCDConfig(scd_type=scd_type, key_columns=key_columns)
-                merge_config = MergeConfig(scd_config=scd_config)
-            elif merge_predicate:
-                merge_config = MergeConfig(mode="upsert", predicate=merge_predicate)
-            else:
-                raise ValueError(
-                    "For merge mode, either merge_predicate or scd_type must be specified"
-                )
-
-        # Extract optimization settings
-        optimization_config = delta_kwargs.pop("optimization_config", None)
-        enable_optimization = delta_kwargs.pop("enable_optimization", False)
-        if enable_optimization and not optimization_config:
-            # Build default optimization config from individual options
-            from ray.data._internal.datasource.delta import OptimizationMode
-
-            opt_mode = OptimizationMode.COMPACT
-            z_order_columns = delta_kwargs.pop("z_order_columns", None)
-            if z_order_columns:
-                opt_mode = OptimizationMode.Z_ORDER
-
-            optimization_config = OptimizationConfig(
-                mode=opt_mode,
-                z_order_columns=z_order_columns,
-                target_size_bytes=delta_kwargs.pop("compact_target_size", None),
-                retention_hours=delta_kwargs.pop("vacuum_retention_hours", None),
-            )
+        from ray.data._internal.datasource.delta import DeltaDatasink, DeltaWriteConfig
 
         # Build Delta write configuration
         config = DeltaWriteConfig(
             mode=mode,
             partition_cols=partition_cols,
             storage_options=storage_options,
-            merge_config=merge_config,
-            optimization_config=optimization_config,
             **delta_kwargs,
         )
 
         # Create datasink
         datasink = DeltaDatasink(
             path,
+            mode=mode,
+            partition_cols=partition_cols,
             filesystem=filesystem,
-            try_create_dir=try_create_dir,
-            config=config,
+            **delta_kwargs,
         )
 
         # Execute write
@@ -3568,6 +3504,7 @@ class Dataset:
             ray_remote_args=ray_remote_args or {},
             concurrency=concurrency,
         )
+
 
     @ConsumptionAPI
     @PublicAPI(api_group=IOC_API_GROUP)
