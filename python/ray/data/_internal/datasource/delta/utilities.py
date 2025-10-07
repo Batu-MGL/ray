@@ -2,9 +2,12 @@
 Delta Lake utility functions for credential management and table operations.
 """
 
-from typing import Dict, Optional
+from typing import TYPE_CHECKING, Dict, Optional
 
-from deltalake import DeltaTable
+from ray.data._internal.util import _check_import
+
+if TYPE_CHECKING:
+    from deltalake import DeltaTable
 
 
 class AWSUtilities:
@@ -56,7 +59,7 @@ class AzureUtilities:
 
 def try_get_deltatable(
     table_uri: str, storage_options: Optional[Dict[str, str]] = None
-) -> Optional[DeltaTable]:
+) -> Optional["DeltaTable"]:
     """
     Try to get a DeltaTable object, returning None if it doesn't exist.
 
@@ -68,6 +71,8 @@ def try_get_deltatable(
         DeltaTable object if successful, None otherwise
     """
     try:
+        from deltalake import DeltaTable
+
         return DeltaTable(table_uri, storage_options=storage_options)
     except Exception:
         return None
@@ -102,6 +107,6 @@ class DeltaUtilities:
         # Merge with provided (provided takes precedence)
         return {**auto_options, **provided}
 
-    def get_table(self) -> Optional[DeltaTable]:
+    def get_table(self) -> Optional["DeltaTable"]:
         """Get the DeltaTable object."""
         return try_get_deltatable(self.path, self.storage_options)

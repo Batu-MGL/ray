@@ -40,7 +40,6 @@ from ray.data._internal.datasource.clickhouse_datasink import (
     SinkMode,
 )
 from ray.data._internal.datasource.csv_datasink import CSVDatasink
-from ray.data._internal.datasource.delta import DeltaDatasink
 from ray.data._internal.datasource.iceberg_datasink import IcebergDatasink
 from ray.data._internal.datasource.image_datasink import ImageDatasink
 from ray.data._internal.datasource.json_datasink import JSONDatasink
@@ -3473,6 +3472,9 @@ class Dataset:
             this dataset. Merge operations are not supported in v1 - use append or
             overwrite modes.
         """
+        # Lazy import to avoid requiring deltalake for all Ray Data usage
+        from ray.data._internal.datasource.delta import DeltaDatasink
+
         # Create Delta datasink (which internally creates DeltaWriteConfig)
         datasink = DeltaDatasink(
             path,
