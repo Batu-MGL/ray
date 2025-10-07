@@ -55,9 +55,9 @@ class DeltaTestValidator:
         df: pd.DataFrame, expected_count: int, id_column: str = "id"
     ) -> None:
         """Validate data integrity with comprehensive checks."""
-        assert (
-            len(df) == expected_count
-        ), f"Expected {expected_count} rows, got {len(df)}"
+        assert len(df) == expected_count, (
+            f"Expected {expected_count} rows, got {len(df)}"
+        )
 
         if id_column in df.columns:
             # Check for duplicates
@@ -88,9 +88,9 @@ class DeltaTestValidator:
         """Validate performance meets minimum thresholds."""
         if operation_time > 0:
             throughput = record_count / operation_time
-            assert (
-                throughput >= min_throughput
-            ), f"Throughput {throughput:.0f} records/sec below minimum {min_throughput}"
+            assert throughput >= min_throughput, (
+                f"Throughput {throughput:.0f} records/sec below minimum {min_throughput}"
+            )
 
     @staticmethod
     def create_test_data(
@@ -230,9 +230,9 @@ def test_delta_read_basic(data_path, batch_size, write_mode):
 
     # Comprehensive validation
     actual_count = ds.count()
-    assert (
-        actual_count == expected_count
-    ), f"Expected {expected_count} rows, got {actual_count}"
+    assert actual_count == expected_count, (
+        f"Expected {expected_count} rows, got {actual_count}"
+    )
 
     # Schema validation
 
@@ -328,9 +328,9 @@ def test_delta_write_partitioned(data_path, batch_size, write_mode):
     # Comprehensive validation
     expected_rows = batch_size if write_mode == "overwrite" else batch_size * 2
     actual_rows = res_ds.count()
-    assert (
-        actual_rows == expected_rows
-    ), f"Expected {expected_rows} rows, got {actual_rows}"
+    assert actual_rows == expected_rows, (
+        f"Expected {expected_rows} rows, got {actual_rows}"
+    )
 
     # Schema validation - ensure all columns are preserved
     expected_columns = {
@@ -344,9 +344,9 @@ def test_delta_write_partitioned(data_path, batch_size, write_mode):
         "nullable_col",
     }
     actual_columns = set(res_ds.schema().names)
-    assert (
-        actual_columns == expected_columns
-    ), f"Schema mismatch. Expected: {expected_columns}, Got: {actual_columns}"
+    assert actual_columns == expected_columns, (
+        f"Schema mismatch. Expected: {expected_columns}, Got: {actual_columns}"
+    )
 
     # Data integrity validation
     all_rows = res_ds.take_all()
@@ -378,9 +378,9 @@ def test_delta_write_partitioned(data_path, batch_size, write_mode):
                         year_dirs = [
                             d for d in os.listdir(part_path) if d.startswith("year=")
                         ]
-                        assert (
-                            len(year_dirs) > 0
-                        ), f"No year partitions found in {part_dir}"
+                        assert len(year_dirs) > 0, (
+                            f"No year partitions found in {part_dir}"
+                        )
     except OSError:
         # Directory listing might fail in some environments, that's OK
         pass
@@ -398,9 +398,9 @@ def test_delta_write_partitioned(data_path, batch_size, write_mode):
     expected_nulls = len([i for i in range(batch_size) if i % 3 == 0])
     if write_mode == "append":
         expected_nulls *= 2
-    assert (
-        null_count == expected_nulls
-    ), f"Expected {expected_nulls} nulls, got {null_count}"
+    assert null_count == expected_nulls, (
+        f"Expected {expected_nulls} nulls, got {null_count}"
+    )
 
     # Performance validation (relaxed thresholds for small datasets)
     if batch_size >= 100:
@@ -728,6 +728,98 @@ def test_advanced_merge_operations(tmp_path):
 
         # Performance validation
         DeltaTestValidator.validate_performance_metrics(merge_time, 3, 50)
+
+
+def test_pyarrow_filter_to_sql_conversion():
+    """Test conversion of PyArrow filters to Delta Lake SQL predicates."""
+    from ray.data._internal.datasource.delta.utilities import (
+        convert_pyarrow_filter_to_sql,
+    )
+
+    # Test simple filters
+    assert convert_pyarrow_filter_to_sql([("year", "=", "2024")]) == "year = '2024'"
+    assert convert_pyarrow_filter_to_sql([("age", ">", 18)]) == "age > 18"
+    assert convert_pyarrow_filter_to_sql([("price", "<=", 99.99)]) == "price <= 99.99"
+    assert (
+        convert_pyarrow_filter_to_sql([("status", "!=", "pending")])
+        == "status != 'pending'"
+    )
+
+    # Test boolean and None values
+    assert convert_pyarrow_filter_to_sql([("active", "=", True)]) == "active = TRUE"
+    assert convert_pyarrow_filter_to_sql([("deleted", "=", False)]) == "deleted = FALSE"
+    assert convert_pyarrow_filter_to_sql([("value", "=", None)]) == "value = NULL"
+
+    # Test IN operator
+    assert (
+        convert_pyarrow_filter_to_sql([("category", "in", ["A", "B", "C"])])
+        == "category IN ('A', 'B', 'C')"
+    )
+    assert convert_pyarrow_filter_to_sql([("id", "in", [1, 2, 3])]) == "id IN (1, 2, 3)"
+
+    # Test NOT IN operator
+    assert (
+        convert_pyarrow_filter_to_sql([("status", "not in", ["pending", "failed"])])
+        == "status NOT IN ('pending', 'failed')"
+    )
+
+    # Test conjunction (AND) of conditions
+    assert (
+        convert_pyarrow_filter_to_sql([(("year", "=", 2024), ("month", ">", 6))])
+        == "(year = 2024 AND month > 6)"
+    )
+    assert (
+        convert_pyarrow_filter_to_sql(
+            [(("active", "=", True), ("age", ">", 18), ("country", "=", "US"))]
+        )
+        == "(active = TRUE AND age > 18 AND country = 'US')"
+    )
+
+    # Test disjunction (OR) of conditions
+    assert (
+        convert_pyarrow_filter_to_sql(
+            [("status", "=", "active"), ("status", "=", "pending")]
+        )
+        == "status = 'active' OR status = 'pending'"
+    )
+
+    # Test complex DNF (combination of AND and OR)
+    assert (
+        convert_pyarrow_filter_to_sql(
+            [
+                (("year", "=", 2024), ("month", ">", 6)),
+                (("year", "=", 2023), ("month", "<=", 6)),
+            ]
+        )
+        == "(year = 2024 AND month > 6) OR (year = 2023 AND month <= 6)"
+    )
+
+    # Test string escaping
+    assert (
+        convert_pyarrow_filter_to_sql([("name", "=", "O'Brien")]) == "name = 'O''Brien'"
+    )
+    assert (
+        convert_pyarrow_filter_to_sql([("description", "=", "It's a test")])
+        == "description = 'It''s a test'"
+    )
+
+    # Test None input
+    assert convert_pyarrow_filter_to_sql(None) is None
+
+    # Test empty filters
+    assert convert_pyarrow_filter_to_sql([]) is None
+
+    # Test invalid filter format
+    with pytest.raises(ValueError):
+        convert_pyarrow_filter_to_sql([("col1",)])  # Too few elements
+
+    with pytest.raises(ValueError):
+        convert_pyarrow_filter_to_sql([[("col1", "=", 1)]])  # Wrong nesting
+
+    with pytest.raises(ValueError):
+        convert_pyarrow_filter_to_sql([("col1", "in", "not_a_list")])  # IN without list
+
+    print("All filter conversion tests passed!")
 
 
 if __name__ == "__main__":
