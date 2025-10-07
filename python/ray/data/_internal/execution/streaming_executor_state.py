@@ -29,8 +29,13 @@ from ray.data._internal.execution.operators.base_physical_operator import (
     AllToAllOperator,
     InternalQueueOperatorMixin,
 )
+from ray.data._internal.execution.operators.hash_shuffle import (
+    HashShuffleProgressBarMixin,
+)
 from ray.data._internal.execution.operators.input_data_buffer import InputDataBuffer
-from ray.data._internal.execution.resource_manager import ResourceManager
+from ray.data._internal.execution.resource_manager import (
+    ResourceManager,
+)
 from ray.data._internal.progress_bar import ProgressBar
 from ray.data._internal.util import (
     unify_schemas_with_validation,
@@ -117,7 +122,7 @@ class OpBufferQueue:
         if output_split_idx is None:
             try:
                 with self._lock:
-                    ret = self._queue.pop()
+                    ret = self._queue.get_next()
             except IndexError:
                 pass
         else:
@@ -132,10 +137,10 @@ class OpBufferQueue:
                 # preserve the order of ref bundles with different output splits.
                 with self._lock:
                     while len(self._queue) > 0:
-                        ref = self._queue.pop()
+                        ref = self._queue.get_next()
                         self._outputs_by_split[ref.output_split_idx].add(ref)
             try:
-                ret = split_queue.pop()
+                ret = split_queue.get_next()
             except IndexError:
                 pass
         if ret is None:
@@ -212,13 +217,16 @@ class OpState:
         For AllToAllOperator, zero or more sub progress bar would be created.
         Return the number of enabled progress bars created for this operator.
         """
-        is_all_to_all = isinstance(self.op, AllToAllOperator)
+        contains_sub_progress_bars = isinstance(
+            self.op, AllToAllOperator
+        ) or isinstance(self.op, HashShuffleProgressBarMixin)
         # Only show 1:1 ops when in verbose progress mode.
+
         ctx = DataContext.get_current()
         progress_bar_enabled = (
             ctx.enable_progress_bars
             and ctx.enable_operator_progress_bars
-            and (is_all_to_all or verbose_progress)
+            and (contains_sub_progress_bars or verbose_progress)
         )
         self.progress_bar = ProgressBar(
             "- " + self.op.name,
@@ -228,7 +236,7 @@ class OpState:
             enabled=progress_bar_enabled,
         )
         num_progress_bars = 1
-        if is_all_to_all:
+        if contains_sub_progress_bars:
             # Initialize must be called for sub progress bars, even the
             # bars are not enabled via the DataContext.
             num_progress_bars += self.op.initialize_sub_progress_bars(index + 1)
@@ -238,7 +246,11 @@ class OpState:
         """Close all progress bars for this operator."""
         if self.progress_bar:
             self.progress_bar.close()
-            if isinstance(self.op, AllToAllOperator):
+            contains_sub_progress_bars = isinstance(
+                self.op, AllToAllOperator
+            ) or isinstance(self.op, HashShuffleProgressBarMixin)
+            if contains_sub_progress_bars:
+                # Close all sub progress bars.
                 self.op.close_sub_progress_bars()
 
     def total_enqueued_input_bundles(self) -> int:
@@ -259,12 +271,19 @@ class OpState:
         operator across (external) input queues"""
         return sum(len(q) for q in self.input_queues)
 
+    def has_pending_bundles(self) -> bool:
+        return self._pending_dispatch_input_bundles_count() > 0
+
     def add_output(self, ref: RefBundle) -> None:
         """Move a bundle produced by the operator to its outqueue."""
 
         ref, diverged = dedupe_schemas_with_validation(
-            self._schema, ref, warn=not self._warned_on_schema_divergence
+            self._schema,
+            ref,
+            warn=not self._warned_on_schema_divergence,
+            enforce_schemas=self.op.data_context.enforce_schemas,
         )
+
         self._schema = ref.schema
         self._warned_on_schema_divergence |= diverged
 
@@ -282,6 +301,9 @@ class OpState:
         self.op.metrics.num_alive_actors = actor_info.running
         self.op.metrics.num_restarting_actors = actor_info.restarting
         self.op.metrics.num_pending_actors = actor_info.pending
+        for next_op in self.op.output_dependencies:
+            next_op.metrics.num_external_inqueue_blocks += len(ref.blocks)
+            next_op.metrics.num_external_inqueue_bytes += ref.size_bytes()
 
     def refresh_progress_bar(self, resource_manager: ResourceManager) -> None:
         """Update the console with the latest operator progress."""
@@ -326,6 +348,8 @@ class OpState:
             ref = inqueue.pop()
             if ref is not None:
                 self.op.add_input(ref, input_index=i)
+                self.op.metrics.num_external_inqueue_bytes -= ref.size_bytes()
+                self.op.metrics.num_external_inqueue_blocks -= len(ref.blocks)
                 return
 
         assert False, "Nothing to dispatch"
@@ -542,8 +566,17 @@ def update_operator_states(topology: Topology) -> None:
     """Update operator states accordingly for newly completed tasks.
     Should be called after `process_completed_tasks()`."""
 
-    # Call inputs_done() on ops where no more inputs are coming.
     for op, op_state in topology.items():
+        # Drain upstream output queue if current operator is execution finished.
+        # This is needed when the limit is reached, and `mark_execution_finished`
+        # is called manually.
+        if op.execution_finished():
+            for idx, dep in enumerate(op.input_dependencies):
+                upstream_state = topology[dep]
+                # Drain upstream output queue
+                upstream_state.output_queue.clear()
+
+        # Call inputs_done() on ops where no more inputs are coming.
         if op_state.inputs_done_called:
             continue
         all_inputs_done = True
@@ -606,12 +639,8 @@ def get_eligible_operators(
         # Check whether operator could start executing immediately:
         #   - It's not completed
         #   - It can accept at least one input
-        #   - Its input queue is not empty
-        if (
-            not op.completed()
-            and op.should_add_input()
-            and state._pending_dispatch_input_bundles_count() > 0
-        ):
+        #   - Its input queue has a valid bundle
+        if not op.completed() and op.should_add_input() and state.has_pending_bundles():
             if not in_backpressure:
                 op_runnable = True
                 eligible_ops.append(op)
@@ -733,7 +762,7 @@ def dedupe_schemas_with_validation(
     old_schema: Optional["Schema"],
     bundle: "RefBundle",
     warn: bool = True,
-    allow_divergent: bool = False,
+    enforce_schemas: bool = False,
 ) -> Tuple["RefBundle", bool]:
     """Unify/Dedupe two schemas, warning if warn=True
 
@@ -742,7 +771,7 @@ def dedupe_schemas_with_validation(
             the new schema will be used as the old schema.
         bundle: The new `RefBundle` to unify with the old schema.
         warn: Raise a warning if the schemas diverge.
-        allow_divergent: If `True`, allow the schemas to diverge and return unified schema.
+        enforce_schemas: If `True`, allow the schemas to diverge and return unified schema.
             If `False`, but keep the old schema.
 
     Returns:
@@ -752,7 +781,10 @@ def dedupe_schemas_with_validation(
     # Note, often times the refbundles correspond to only one schema. We can reduce the
     # memory footprint of multiple schemas by keeping only one copy.
     diverged = False
-    if not old_schema:
+
+    from ray.data.block import _is_empty_schema
+
+    if _is_empty_schema(old_schema):
         return bundle, diverged
 
     # This check is fast assuming pyarrow schemas
@@ -760,13 +792,13 @@ def dedupe_schemas_with_validation(
         return bundle, diverged
 
     diverged = True
-    if warn:
+    if warn and enforce_schemas:
         logger.warning(
             f"Operator produced a RefBundle with a different schema "
             f"than the previous one. Previous schema: {old_schema}, "
             f"new schema: {bundle.schema}. This may lead to unexpected behavior."
         )
-    if allow_divergent:
+    if enforce_schemas:
         old_schema = unify_schemas_with_validation([old_schema, bundle.schema])
 
     return (

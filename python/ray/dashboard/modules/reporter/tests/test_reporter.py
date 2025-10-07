@@ -9,12 +9,13 @@ from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
-from ray._common.test_utils import wait_for_condition
 import requests
 from google.protobuf import text_format
 
 import ray
-import ray._private.usage.usage_lib as ray_usage_lib
+import ray._common.usage.usage_lib as ray_usage_lib
+from ray._common.network_utils import build_address
+from ray._common.test_utils import wait_for_condition
 from ray._private import ray_constants
 from ray._private.metrics_agent import fix_grpc_metric
 from ray._private.test_utils import (
@@ -122,6 +123,7 @@ STATS_TEMPLATE = {
         ),
     },
     "gpus": [],
+    "gpu_processes": {},
     "tpus": [],
     "network": (13621160960, 11914936320),
     "network_speed": (8.435062128545095, 7.378462703142336),
@@ -197,11 +199,11 @@ def enable_open_telemetry(request):
     Fixture to enable OpenTelemetry for the test.
     """
     if request.param:
-        os.environ["RAY_experimental_enable_open_telemetry_on_agent"] = "1"
+        os.environ["RAY_enable_open_telemetry"] = "1"
     else:
-        os.environ["RAY_experimental_enable_open_telemetry_on_agent"] = "0"
+        os.environ["RAY_enable_open_telemetry"] = "0"
     yield
-    os.environ.pop("RAY_experimental_enable_open_telemetry_on_agent", None)
+    os.environ.pop("RAY_enable_open_telemetry", None)
 
 
 @pytest.mark.skipif(prometheus_client is None, reason="prometheus_client not installed")
@@ -214,8 +216,8 @@ def test_prometheus_physical_stats_record(
 ):
     addresses = ray.init(include_dashboard=True, num_cpus=1)
     metrics_export_port = addresses["metrics_export_port"]
-    addr = addresses["raylet_ip_address"]
-    prom_addresses = [f"{addr}:{metrics_export_port}"]
+    addr = addresses["node_ip_address"]
+    prom_addresses = [build_address(addr, metrics_export_port)]
 
     def test_case_stats_exist():
         _, metric_descriptors, _ = fetch_prometheus(prom_addresses)
@@ -267,11 +269,8 @@ def test_prometheus_physical_stats_record(
                 break
         return str(raylet_proc.process.pid) == str(raylet_pid)
 
-    wait_for_condition(
-        lambda: test_case_stats_exist() and test_case_ip_correct(),
-        timeout=30,
-        retry_interval_ms=1000,
-    )
+    wait_for_condition(test_case_stats_exist, timeout=30, retry_interval_ms=1000)
+    wait_for_condition(test_case_ip_correct, timeout=30, retry_interval_ms=1000)
 
 
 @pytest.mark.skipif(
@@ -281,8 +280,8 @@ def test_prometheus_physical_stats_record(
 def test_prometheus_export_worker_and_memory_stats(enable_test_module, shutdown_only):
     addresses = ray.init(include_dashboard=True, num_cpus=1)
     metrics_export_port = addresses["metrics_export_port"]
-    addr = addresses["raylet_ip_address"]
-    prom_addresses = [f"{addr}:{metrics_export_port}"]
+    addr = addresses["node_ip_address"]
+    prom_addresses = [build_address(addr, metrics_export_port)]
 
     @ray.remote
     def f():
@@ -310,6 +309,7 @@ def test_prometheus_export_worker_and_memory_stats(enable_test_module, shutdown_
 
 def test_report_stats():
     dashboard_agent = MagicMock()
+    dashboard_agent.gcs_address = build_address("127.0.0.1", 6379)
     agent = ReporterAgent(dashboard_agent)
     # Assume it is a head node.
     agent._is_head_node = True
@@ -332,9 +332,11 @@ def test_report_stats():
         print(record.gauge.name)
         print(record)
     assert len(records) == 41
-    # Verify IsHeadNode tag
+    # Verify RayNodeType and IsHeadNode tags
     for record in records:
         if record.gauge.name.startswith("node_"):
+            assert "RayNodeType" in record.tags
+            assert record.tags["RayNodeType"] == "head"
             assert "IsHeadNode" in record.tags
             assert record.tags["IsHeadNode"] == "true"
     # Test stats without raylets
@@ -369,6 +371,7 @@ def test_report_stats():
 
 def test_report_stats_gpu():
     dashboard_agent = MagicMock()
+    dashboard_agent.gcs_address = build_address("127.0.0.1", 6379)
     agent = ReporterAgent(dashboard_agent)
     # Assume it is a head node.
     agent._is_head_node = True
@@ -455,13 +458,19 @@ def test_report_stats_gpu():
         index = 0
         for record in records:
             if record.tags["GpuIndex"] == "3":
-                assert record.tags == {"ip": ip, "GpuIndex": "3", "IsHeadNode": "true"}
+                assert record.tags == {
+                    "ip": ip,
+                    "GpuIndex": "3",
+                    "IsHeadNode": "true",
+                    "RayNodeType": "head",
+                }
             else:
                 assert record.tags == {
                     "ip": ip,
                     # The tag value must be string for prometheus.
                     "GpuIndex": str(index),
                     "GpuDeviceName": "NVIDIA A10G",
+                    "RayNodeType": "head",
                     "IsHeadNode": "true",
                 }
 
@@ -483,6 +492,7 @@ def test_report_stats_gpu():
 
 def test_get_tpu_usage():
     dashboard_agent = MagicMock()
+    dashboard_agent.gcs_address = build_address("127.0.0.1", 6379)
     agent = ReporterAgent(dashboard_agent)
 
     fake_metrics_content = """
@@ -539,6 +549,7 @@ def test_get_tpu_usage():
 
 def test_report_stats_tpu():
     dashboard_agent = MagicMock()
+    dashboard_agent.gcs_address = build_address("127.0.0.1", 6379)
     agent = ReporterAgent(dashboard_agent)
 
     STATS_TEMPLATE["tpus"] = [
@@ -611,6 +622,7 @@ def test_report_stats_tpu():
 
 def test_report_per_component_stats():
     dashboard_agent = MagicMock()
+    dashboard_agent.gcs_address = build_address("127.0.0.1", 6379)
     agent = ReporterAgent(dashboard_agent)
     # Assume it is a head node.
     agent._is_head_node = True
@@ -869,6 +881,9 @@ def test_reporter_worker_cpu_percent():
 
         def _generate_worker_key(self, proc):
             return (proc.pid, proc.create_time())
+
+        def _get_worker_processes(self):
+            return ReporterAgent._get_worker_processes(self)
 
     obj = ReporterAgentDummy()
 

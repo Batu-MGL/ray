@@ -289,6 +289,10 @@ def test_controller_recover_target_capacity(
         "upscaling_factor": 4,
         "downscaling_factor": 4,
         "metrics_interval_s": 1,
+        # The default look_back_period_s is 30, which means the test assertions will be
+        # slow to respond to changes in metrics. Setting it to 1 makes the test assertions
+        # more responsive to changes in metrics, hence reducing flakiness.
+        "look_back_period_s": 1,
     },
     max_ongoing_requests=2,
     graceful_shutdown_timeout_s=0,
@@ -641,7 +645,9 @@ class TestTargetCapacityUpdateAndServeStatus:
         self, shutdown_ray_and_serve, client: ServeControllerClient
     ):
         """Check Serve's status when target_capacity changes while autoscaling."""
-
+        # TODO(landscapepainter): This test fails locally due to the stall for replica initialization
+        # during upscaling and delayed response from serve.status(). It does not fail from
+        # buildkite, but need to investigate why it fails locally.
         app_name = "controlled_app"
         deployment_name = "controlled"
         min_replicas = 10
@@ -892,6 +898,9 @@ class TestInitialReplicasHandling:
     def test_initial_replicas_scales_down(
         self, shutdown_ray_and_serve, client: ServeControllerClient
     ):
+        # TODO(landscapepainter): This test fails locally due to the stall for replica initialization
+        # during upscaling and delayed response from serve.status(). It does not fail from
+        # buildkite, but need to investigate why it fails locally.
         deployment_name = "start_at_ten"
         min_replicas = 5
         initial_replicas = 10
@@ -937,6 +946,9 @@ class TestInitialReplicasHandling:
     def test_initial_replicas_scales_up_and_down(
         self, shutdown_ray_and_serve, client: ServeControllerClient
     ):
+        # TODO(landscapepainter): This test fails locally due to the stall for replica initialization
+        # during upscaling and delayed response from serve.status(). It does not fail from
+        # buildkite, but need to investigate why it fails locally.
         deployment_name = "start_at_ten"
         min_replicas = 0
         initial_replicas = 10
@@ -1023,6 +1035,9 @@ class TestInitialReplicasHandling:
     def test_initial_replicas_new_configs(
         self, shutdown_ray_and_serve, client: ServeControllerClient
     ):
+        # TODO(landscapepainter): This test fails locally due to the stall for replica initialization
+        # during upscaling and delayed response from serve.status(). It does not fail from
+        # buildkite, but need to investigate why it fails locally.
         deployment_name = "start_at_ten"
         min_replicas = 0
         initial_replicas = 20
