@@ -318,8 +318,9 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
         # Track file for cleanup on failure
         self._written_files.add(full_path)
 
-        file_size = self._write_parquet_file(table, full_path)
-        file_statistics = self._compute_statistics(table)
+        table_to_write = self._prepare_table_for_write(table)
+        file_size = self._write_parquet_file(table_to_write, full_path)
+        file_statistics = self._compute_statistics(table_to_write)
 
         return AddAction(
             path=relative_path,
@@ -377,8 +378,6 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
 
     def _write_parquet_file(self, table: pa.Table, file_path: str) -> int:
         """Write PyArrow table to Parquet file and return file size."""
-        table_to_write = self._prepare_table_for_write(table)
-
         compression = self.write_kwargs.get("compression", "snappy")
         valid_compressions = ["snappy", "gzip", "brotli", "zstd", "lz4", "none"]
         if compression not in valid_compressions:
@@ -388,7 +387,7 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
 
         self._ensure_parent_directory(file_path)
         pq.write_table(
-            table_to_write,
+            table,
             file_path,
             filesystem=self.filesystem,
             compression=compression,
