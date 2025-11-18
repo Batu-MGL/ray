@@ -23,16 +23,20 @@ def convert_pyarrow_filter_to_sql(
         elif isinstance(v, bool):
             return "TRUE" if v else "FALSE"
         elif isinstance(v, str):
-            return f"'{v.replace(\"'\", \"''\")}'"
+            escaped = v.replace("'", "''")
+            return f"'{escaped}'"
         elif isinstance(v, (int, float)):
             return str(v)
-        return f"'{str(v).replace(\"'\", \"''\")}'"
+        escaped = str(v).replace("'", "''")
+        return f"'{escaped}'"
 
     def fmt_cond(col: str, op: str, val: Any) -> str:
         op_upper = op.upper()
         if op_upper in ("IN", "NOT IN"):
             if not isinstance(val, (list, tuple)):
-                raise ValueError(f"IN/NOT IN requires list/tuple, got {type(val).__name__}")
+                raise ValueError(
+                    f"IN/NOT IN requires list/tuple, got {type(val).__name__}"
+                )
             return f"{col} {op_upper} ({', '.join(fmt_val(v) for v in val)})"
         return f"{col} {op} {fmt_val(val)}"
 
