@@ -116,9 +116,6 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
             )
 
         if self.mode == WriteMode.IGNORE and self._existing_table_at_start:
-            logger.info(
-                f"Delta table already exists at {self.path}. Skipping write due to mode='ignore'."
-            )
             self._skip_write = True
         else:
             self._skip_write = False
@@ -469,10 +466,6 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
     def on_write_complete(self, write_result: WriteResult[List["AddAction"]]) -> None:
         """Phase 2: Commit all files in single ACID transaction."""
         all_file_actions = self._collect_file_actions(write_result)
-
-        # Validate all file actions before committing
-        self._validate_file_actions(all_file_actions)
-
         existing_table = try_get_deltatable(self.path, self.storage_options)
 
         if (
@@ -489,15 +482,10 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
 
         if not all_file_actions:
             if self.schema and not existing_table:
-                logger.info(
-                    f"Creating empty Delta table at {self.path} with specified schema"
-                )
                 self._create_empty_table()
-            else:
-                logger.info(
-                    f"No files to commit for Delta table at {self.path}. Skipping table creation."
-                )
             return
+
+        self._validate_file_actions(all_file_actions)
 
         if existing_table:
             self._commit_to_existing_table(existing_table, all_file_actions)
@@ -556,7 +544,6 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
                 "post_commithook_properties"
             ),
         )
-        logger.info(f"Created empty Delta table at {self.path}")
 
     def _create_table_with_files(self, file_actions: List["AddAction"]) -> None:
         """Create new Delta table and commit files in single transaction."""
@@ -580,9 +567,6 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
                 "post_commithook_properties"
             ),
         )
-        logger.info(
-            f"Created Delta table at {self.path} with {len(file_actions)} files"
-        )
 
     def _commit_to_existing_table(
         self, existing_table: "DeltaTable", file_actions: List["AddAction"]
@@ -596,9 +580,6 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
             )
 
         if self.mode == WriteMode.IGNORE:
-            logger.info(
-                f"Table created at {self.path} during write. Skipping commit due to mode='ignore'."
-            )
             return
         if file_actions:
             existing_schema = existing_table.schema().to_pyarrow()
@@ -636,9 +617,6 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
             post_commithook_properties=self.write_kwargs.get(
                 "post_commithook_properties"
             ),
-        )
-        logger.info(
-            f"Committed {len(file_actions)} files to Delta table at {self.path} (mode={transaction_mode})"
         )
 
     def _schemas_compatible(self, schema1: pa.Schema, schema2: pa.Schema) -> bool:
@@ -768,10 +746,6 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
 
     def _cleanup_written_files(self) -> None:
         """Clean up all written files that weren't committed."""
-        if not self._written_files:
-            return
-
-        logger.info(f"Cleaning up {len(self._written_files)} uncommitted files")
         for file_path in self._written_files:
             try:
                 if (
@@ -779,9 +753,8 @@ class DeltaDatasink(Datasink[List["AddAction"]]):
                     != pa_fs.FileType.NotFound
                 ):
                     self.filesystem.delete_file(file_path)
-            except Exception as e:
-                logger.warning(f"Failed to cleanup file {file_path}: {e}")
-
+            except Exception:
+                pass
         self._written_files.clear()
 
     @property
