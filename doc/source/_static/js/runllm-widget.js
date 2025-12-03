@@ -7,7 +7,7 @@ document.addEventListener("DOMContentLoaded", function () {
   script.setAttribute("crossorigin", "true");
   script.setAttribute("runllm-keyboard-shortcut", "Mod+j");
   script.setAttribute("runllm-name", "Ray RunLLM Bot");
-  script.setAttribute("runllm-position", "BOTTOM_LEFT");
+  script.setAttribute("runllm-position", "BOTTOM_RIGHT");
   script.setAttribute("runllm-assistant-id", "1003");
   script.async = true;
   document.head.appendChild(script);
